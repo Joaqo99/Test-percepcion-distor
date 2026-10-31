@@ -8,7 +8,6 @@
   const CFG = window.CONFIG;
   const P = CFG.partes[PARTE];
   const params = new URLSearchParams(location.search);
-  const LS_KEY = "distorsion_parte1_ts";
 
   const jsPsych = initJsPsych({
     show_progress_bar: true,
@@ -17,6 +16,7 @@
   });
 
   const T0 = new Date();
+  const SESION_ID = window.nuevoId();
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   const normEmail = (e) => String(e || "").trim().toLowerCase();
 
@@ -154,26 +154,6 @@
       <p class="small">La participación es voluntaria. Al continuar aceptás que tus respuestas se usen con este fin.</p>
     </div>`,
     choices: ["Acepto y continuo"]
-  };
-
-  // Aviso suave de fatiga (solo Parte 2, mismo navegador)
-  const avisoFatiga = {
-    timeline: [{
-      type: jsPsychHtmlButtonResponse,
-      stimulus: () => {
-        const h = ((Date.now() - Number(localStorage.getItem(LS_KEY))) / 36e5).toFixed(1);
-        return `<div class="card"><h3>Pasaron solo ${h} h desde la Parte 1</h3>
-          <p>Para evitar la fatiga auditiva te pedimos esperar al menos ${CFG.minHorasEntrePartes} horas entre las dos partes.</p></div>`;
-      },
-      choices: ["Volver más tarde", "Continuar de todos modos"],
-      on_finish: (d) => { if (d.response === 0) { jsPsych.abortExperiment("Podés cerrar esta ventana y volver más tarde. ¡Gracias!"); } }
-    }],
-    conditional_function: () => {
-      try {
-        const ts = Number(localStorage.getItem(LS_KEY));
-        return PARTE === 2 && ts && (Date.now() - ts) / 36e5 < CFG.minHorasEntrePartes;
-      } catch (e) { return false; }
-    }
   };
 
   const reqTxt = "Esta pregunta es obligatoria.";
@@ -334,7 +314,7 @@
   };
 
   // ---------- Envío de datos ----------
-  let payload = null, enviado = false;
+  let payload = null;
   function armarPayload() {
     const previas = jsPsych.data.get().filter({ tarea: PARTE === 1 ? "preguntas_previas" : "identificacion" }).values()[0];
     const r = (previas && previas.response) || {};
@@ -343,7 +323,7 @@
       const { idx, ...resto } = x; return resto;
     });
     return {
-      parte: PARTE, atributo: P.atributo,
+      parte: PARTE, atributo: P.atributo, sesion_id: SESION_ID,
       email: normEmail(r.email),
       edad: r.edad ?? "", toca_instrumento: r.toca_instrumento ?? "", instrumento: r.instrumento ?? "",
       anios_instrumento: r.anios_instrumento ?? "", genero_favorito: r.genero_favorito ?? "",
@@ -360,21 +340,18 @@
     const filas = p.respuestas.map((x) => cab.map((c) => q(x[c] !== undefined ? x[c] : p[c])).join(","));
     return [cab.join(","), ...filas].join("\n");
   }
-  async function enviar(p) {
-    if (!CFG.endpoint) return false;
-    try {
-      await fetch(CFG.endpoint, { method: "POST", mode: "no-cors", headers: { "Content-Type": "text/plain;charset=utf-8" }, body: JSON.stringify(p) });
-      return true;
-    } catch (e) { return false; }
-  }
-
+  let resultadoEnvio = { estado: "sin_endpoint", detalle: "" };
   const envio = {
-    type: jsPsychCallFunction,
-    async: true,
-    func: (done) => {
+    type: jsPsychHtmlKeyboardResponse,
+    choices: "NO_KEYS",
+    stimulus: '<div class="card center"><p>Enviando tus respuestas… <b>no cierres esta ventana</b>.</p></div>',
+    on_load: () => {
       payload = armarPayload();
       window.__payload = payload; // útil para depurar
-      enviar(payload).then((ok) => { enviado = ok; done(); });
+      window.enviarRespuestas(CFG.endpoint, payload).then((r) => {
+        resultadoEnvio = r; window.__envio = r; console.log("Envío:", r);
+        jsPsych.finishTrial();
+      });
     }
   };
 
@@ -382,12 +359,14 @@
     type: jsPsychHtmlKeyboardResponse,
     choices: "NO_KEYS",
     stimulus: () => {
-      try { if (PARTE === 1) localStorage.setItem(LS_KEY, String(Date.now())); } catch (e) {}
       const url = URL.createObjectURL(new Blob(["﻿" + aCSV(payload)], { type: "text/csv;charset=utf-8" }));
       const nombre = `respuestas_parte${PARTE}.csv`;
-      const estado = enviado
-        ? "<p>Tus respuestas fueron enviadas correctamente.</p>"
-        : `<p class="err">No se pudieron enviar automáticamente tus respuestas. Descargá el archivo y mandalo por correo al responsable del estudio.</p>`;
+      const det = resultadoEnvio.detalle ? `<p class="small">Detalle técnico: ${esc(resultadoEnvio.detalle)}</p>` : "";
+      const estado = {
+        confirmado: "<p>Tus respuestas fueron enviadas y recibidas correctamente.</p>",
+        sin_confirmar: `<p>Tus respuestas se enviaron, pero no pudimos confirmar que se hayan recibido. Por las dudas, descargá la copia de abajo y mandala por correo al responsable del estudio.</p>${det}`
+      }[resultadoEnvio.estado] ||
+        `<p class="err"><b>No se pudieron enviar tus respuestas.</b> Descargá el archivo de abajo y mandalo por correo al responsable del estudio.</p>${det}`;
       const siguiente = PARTE === 1
         ? `<p>Para la <b>Parte 2</b>, volvé en otro momento (idealmente después de ${CFG.minHorasEntrePartes} horas) para evitar la fatiga auditiva.</p>
            <p class="center"><a class="btnlink" href="parte2.html?email=${encodeURIComponent(payload.email)}">Ir a la Parte 2</a></p>`
@@ -398,7 +377,7 @@
   };
 
   // ---------- Timeline ----------
-  const timeline = [preload, bienvenida, avisoFatiga,
+  const timeline = [preload, bienvenida,
     PARTE === 1 ? preguntasParte1 : preguntasParte2,
     ...calibracion, instrucciones, bloqueItems, envio, final];
 
