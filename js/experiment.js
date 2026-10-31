@@ -4,6 +4,14 @@
 //              PARTE 2 = email + calibración + test de potencia
 // ============================================================
 (function () {
+  // Si algo falla al cargar, mostrar un aviso en vez de una pantalla en blanco.
+  window.addEventListener("error", (ev) => {
+    const d = document.createElement("div");
+    d.style.cssText = "max-width:720px;margin:30px auto;padding:16px;background:#fff;border:2px solid #b00020;border-radius:8px;font-family:sans-serif";
+    d.innerHTML = "<b style='color:#b00020'>Ocurrió un error al cargar el test.</b><br>Detalle técnico: " +
+      String(ev.message || "").replace(/</g, "&lt;") + "<br><small>Recargá con Ctrl+F5. Si sigue, avisá al responsable (suele faltar subir un archivo al sitio).</small>";
+    document.body.appendChild(d);
+  });
   const PARTE = window.PARTE;
   const CFG = window.CONFIG;
   const P = CFG.partes[PARTE];
@@ -16,7 +24,7 @@
   });
 
   const T0 = new Date();
-  const SESION_ID = window.nuevoId();
+  const SESION_ID = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   const normEmail = (e) => String(e || "").trim().toLowerCase();
 
@@ -340,6 +348,23 @@
     const filas = p.respuestas.map((x) => cab.map((c) => q(x[c] !== undefined ? x[c] : p[c])).join(","));
     return [cab.join(","), ...filas].join("\n");
   }
+  // Envío simple al Apps Script (sin leer la respuesta: el navegador no la permite con "no-cors").
+  // Solo se considera fallo si el navegador no pudo hacer la solicitud (sin internet, URL inválida…).
+  async function enviar(p) {
+    if (!CFG.endpoint) return { estado: "sin_endpoint", detalle: "No hay URL configurada en js/config.js (endpoint)." };
+    let ultimo = "";
+    for (let i = 0; i < 3; i++) {
+      try {
+        await fetch(CFG.endpoint, { method: "POST", mode: "no-cors", headers: { "Content-Type": "text/plain;charset=utf-8" }, body: JSON.stringify(p) });
+        return { estado: "confirmado", detalle: "" };
+      } catch (e) {
+        ultimo = String((e && e.message) || e);
+        await new Promise((r) => setTimeout(r, 1000 * (i + 1)));
+      }
+    }
+    return { estado: "error", detalle: ultimo };
+  }
+
   let resultadoEnvio = { estado: "sin_endpoint", detalle: "" };
   const envio = {
     type: jsPsychHtmlKeyboardResponse,
@@ -348,7 +373,7 @@
     on_load: () => {
       payload = armarPayload();
       window.__payload = payload; // útil para depurar
-      window.enviarRespuestas(CFG.endpoint, payload).then((r) => {
+      enviar(payload).then((r) => {
         resultadoEnvio = r; window.__envio = r; console.log("Envío:", r);
         jsPsych.finishTrial();
       });
@@ -363,8 +388,7 @@
       const nombre = `respuestas_parte${PARTE}.csv`;
       const det = resultadoEnvio.detalle ? `<p class="small">Detalle técnico: ${esc(resultadoEnvio.detalle)}</p>` : "";
       const estado = {
-        confirmado: "<p>Tus respuestas fueron enviadas y recibidas correctamente.</p>",
-        sin_confirmar: `<p>Tus respuestas se enviaron, pero no pudimos confirmar que se hayan recibido. Por las dudas, descargá la copia de abajo y mandala por correo al responsable del estudio.</p>${det}`
+        confirmado: "<p>Tus respuestas fueron enviadas correctamente.</p>"
       }[resultadoEnvio.estado] ||
         `<p class="err"><b>No se pudieron enviar tus respuestas.</b> Descargá el archivo de abajo y mandalo por correo al responsable del estudio.</p>${det}`;
       const siguiente = PARTE === 1
