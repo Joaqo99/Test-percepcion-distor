@@ -5,7 +5,7 @@ window.CONFIG = {
   // URL de la "aplicación web" de Google Apps Script que guarda las respuestas
   // en una Google Sheet (ver README.md, paso 3). Si queda vacío, las respuestas
   // NO se envían y el participante solo puede descargar un archivo.
-  endpoint: "",
+  endpoint: "https://script.google.com/macros/s/AKfycbymgwU80saAJ8aLdXII6pxZKc7E7flPzsHNM2cyMbVV8uNBYjE-889VWplqmGzZ2hwTTA/exec",
 
   // Horas mínimas sugeridas entre la Parte 1 y la Parte 2 (anti-fatiga auditiva).
   // Solo es un aviso (se detecta si usa el mismo navegador); no bloquea.
