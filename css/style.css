@@ -13,3 +13,7 @@ body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; ba
 a.btnlink { display: inline-block; padding: 10px 20px; border-radius: 8px; background: #2b59ff; color: #fff; text-decoration: none; }
 .err { color: #b00020; }
 .lbl { font-size: 2.4em; font-weight: 700; color: #2b59ff; height: 1.4em; margin: 6px 0; }
+.jspsych-btn.sel { background: #dfe7ff; border-color: #2b59ff; font-weight: 600; }
+.navrow { display: flex; gap: 12px; justify-content: space-between; margin-top: 22px; }
+.navbtn { flex: 1; padding: 9px 12px; border: 1px solid #c5cbd8; border-radius: 8px; background: transparent; color: #4a5468; cursor: pointer; font-size: .92em; }
+.navbtn:hover { background: #eef2ff; }

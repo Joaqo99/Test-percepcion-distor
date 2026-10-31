@@ -42,7 +42,7 @@
   function cargar(src) {
     if (!ctx) ctx = new AC();
     if (!cache[src]) {
-      cache[src] = fetch(src)
+      cache[src] = fetch(src, { cache: "no-cache" })   // revalida con el servidor: nunca usa un audio viejo guardado
         .then((r) => {
           if (!r.ok) throw new Error(`No se encontró el archivo "${src}" (error ${r.status}). Revisá que exista y que el nombre en js/config.js coincida exactamente (mayúsculas y extensión).`);
           return r.arrayBuffer();
@@ -58,14 +58,16 @@
     return cache[src];
   }
 
-  // srcs: uno o varios archivos que suenan uno detrás de otro (para un par: [A, B]).
+  // srcs/etiquetas/prompt pueden ser valores o funciones (se evalúan en cada visita al ítem).
   // La respuesta se habilita tras escuchar la secuencia completa (o al empezar, si requerirFinal = false).
-  function audioTrial({ srcs, etiquetas, prompt, choices, requerirFinal, data, onFinish }) {
+  // volver(): ¿mostrar "← Anterior"?   previa(): índice de la respuesta ya dada (o null) para resaltarla y mostrar "Siguiente →".
+  function audioTrial({ srcs, etiquetas, prompt, choices, requerirFinal, data, onStart, onFinish, volver, previa }) {
+    const val = (x) => (typeof x === "function" ? x() : x);
     let reproducciones = 0, completo = false, fuentes = [], timers = [];
     return {
       type: jsPsychHtmlButtonResponse,
-      stimulus:
-        `<div class="aud"><p>${prompt}</p>
+      stimulus: () =>
+        `<div class="aud"><p>${val(prompt)}</p>
            <div id="lbl" class="lbl">&nbsp;</div>
            <button type="button" id="play" class="play" disabled>Cargando…</button>
            <p class="small" id="estado">Escuchá el audio completo para habilitar las respuestas.</p></div>`,
@@ -73,23 +75,43 @@
       button_layout: "grid",
       grid_columns: 1,
       data,
+      on_start: () => {
+        reproducciones = 0; completo = false; fuentes = []; timers = [];
+        if (onStart) onStart();
+      },
       on_load: () => {
         const play = document.getElementById("play");
         const estado = document.getElementById("estado");
         const lbl = document.getElementById("lbl");
+        const lista = val(srcs), et = val(etiquetas);
+        const pre = previa ? previa() : null;
         const botones = () => document.querySelectorAll("#jspsych-html-button-response-btngroup button");
         const habilitar = (v) => botones().forEach((b) => (b.disabled = !v));
-        habilitar(DEBUG);
+        habilitar(DEBUG || pre !== null);
+        if (pre !== null) { botones()[pre].classList.add("sel"); estado.textContent = "Ya respondiste este ítem. Podés cambiar tu respuesta o continuar."; }
         const error = () => { estado.innerHTML = '<span class="err">No se pudo cargar el audio. Recargá la página o avisá al responsable.</span>'; };
 
-        Promise.all(srcs.map(cargar)).then((buffers) => {
+        // Navegación: anterior / siguiente (solo si ya fue respondido)
+        const nav = [];
+        if (volver && volver()) nav.push('<button type="button" id="nav-ant" class="navbtn">← Pregunta anterior</button>');
+        if (pre !== null) nav.push('<button type="button" id="nav-sig" class="navbtn">Mantener y continuar →</button>');
+        if (nav.length) {
+          document.getElementById("jspsych-html-button-response-btngroup")
+            .insertAdjacentHTML("afterend", `<div class="navrow">${nav.join("")}</div>`);
+          const ir = (accion) => () => jsPsych.finishTrial({ accion });
+          const ant = document.getElementById("nav-ant"), sig = document.getElementById("nav-sig");
+          if (ant) ant.addEventListener("click", ir("volver"));
+          if (sig) sig.addEventListener("click", ir("avanzar"));
+        }
+
+        Promise.all(lista.map(cargar)).then((buffers) => {
           play.disabled = false; play.textContent = "▶ Reproducir";
           play.addEventListener("click", async () => {
             await ctx.resume();
             reproducciones++; play.disabled = true; play.textContent = "Reproduciendo…";
             if (!requerirFinal) { habilitar(true); estado.textContent = ""; }
             let t = ctx.currentTime + 0.05;            // inicio programado
-            const t0 = t, programa = [];
+            const programa = [];
             fuentes = []; timers.forEach(clearTimeout); timers = [];
             buffers.forEach((buf, i) => {
               const src = ctx.createBufferSource();
@@ -98,14 +120,15 @@
               fuentes.push(src);
               programa.push({ inicio: t, duracion: buf.duration });
               const ms = (t - ctx.currentTime) * 1000;
-              if (etiquetas) timers.push(setTimeout(() => { lbl.textContent = etiquetas[i]; }, Math.max(0, ms)));
+              if (et) timers.push(setTimeout(() => { lbl.textContent = et[i]; }, Math.max(0, ms)));
               t += buf.duration;
             });
             window.__programa = programa;               // para verificar (consola)
             const ultimo = fuentes[fuentes.length - 1];
             ultimo.onended = () => {
               lbl.innerHTML = "&nbsp;"; completo = true; play.disabled = false;
-              play.textContent = "↻ Reproducir de nuevo"; habilitar(true); estado.textContent = "";
+              play.textContent = "↻ Reproducir de nuevo"; habilitar(true);
+              if (pre === null) estado.textContent = "";
             };
           });
         }).catch((e) => { console.error(e); error(); });
@@ -243,24 +266,57 @@
     if (DEBUG) console.table(plan.map((p, k) => ({ orden: k + 1, A: p.A.id, B: p.B.id, par: `${p.i.id}-${p.j.id}` })));
   })();
 
-  const trialsItems = plan.map((p, k) => audioTrial({
-    srcs: [p.A.archivo, p.B.archivo],
+  // ---------- Ítems con navegación (anterior / siguiente) y pantalla de confirmación ----------
+  let k = 0;                                   // ítem actual
+  const resp = new Array(total).fill(null);    // respuesta vigente de cada ítem
+  window.__resp = resp;
+
+  const itemTrial = audioTrial({
+    srcs: () => [plan[k].A.archivo, plan[k].B.archivo],
     etiquetas: ["A", "B"],
-    prompt: `Ítem ${k + 1} de ${total} &nbsp;–&nbsp; ¿Cómo calificarías los sonidos?`,
+    prompt: () => `Ítem ${k + 1} de ${total} &nbsp;–&nbsp; ¿Cómo calificarías los sonidos?`,
     choices: ESCALA.map((e) => e.texto),
     requerirFinal: true,
-    data: {
-      tarea: "item", par_id: `${p.i.id}-${p.j.id}`, estimulo_i: p.i.id, estimulo_j: p.j.id,
-      estimulo_A: p.A.id, estimulo_B: p.B.id, archivo_A: p.A.archivo, archivo_B: p.B.archivo, orden_presentacion: k + 1
-    },
+    data: { tarea: "item_visita" },
+    volver: () => k > 0,
+    previa: () => (resp[k] ? resp[k].idx : null),
+    onStart: () => { jsPsych.progressBar.progress = k / total; },
     onFinish: (d) => {
-      d.respuesta_texto = ESCALA[d.response].texto;
-      d.respuesta_valor = valorDe(d.response);            // <0: A más; >0: B más
-      // Valor "canónico": >0 si el estímulo de menor id (i) tiene MÁS del atributo que el de mayor id (j)
-      d.valor_i_vs_j = p.A.id === p.i.id ? -d.respuesta_valor : d.respuesta_valor;
-      jsPsych.progressBar.progress = (k + 1) / total;
+      if (d.accion === "volver") { k = Math.max(0, k - 1); return; }
+      if (d.accion === "avanzar") { k++; return; }
+      const p = plan[k], prev = resp[k];
+      const valor = valorDe(d.response);          // <0: A más; >0: B más
+      resp[k] = {
+        idx: d.response,
+        par_id: `${p.i.id}-${p.j.id}`, estimulo_i: p.i.id, estimulo_j: p.j.id,
+        estimulo_A: p.A.id, estimulo_B: p.B.id, archivo_A: p.A.archivo, archivo_B: p.B.archivo,
+        orden_presentacion: k + 1,
+        respuesta_texto: ESCALA[d.response].texto, respuesta_valor: valor,
+        // Valor "canónico": >0 si el estímulo de menor id (i) tiene MÁS del atributo que el de mayor id (j)
+        valor_i_vs_j: p.A.id === p.i.id ? -valor : valor,
+        tiempo_ms: d.rt,
+        reproducciones: (prev ? prev.reproducciones : 0) + d.reproducciones,
+        escuchado_completo: !!((prev && prev.escuchado_completo) || d.escuchado_completo),
+        veces_respondido: (prev ? prev.veces_respondido : 0) + 1,
+        respuesta_modificada: prev ? (prev.respuesta_modificada || prev.idx !== d.response) : false
+      };
+      k++;
     }
-  }));
+  });
+
+  const confirmar = {
+    type: jsPsychHtmlButtonResponse,
+    stimulus: `<div class="card center"><h2>¡Terminaste los ${total} ítems!</h2>
+      <p>Si querés revisar o cambiar alguna respuesta, volvé a la última pregunta y retrocedé con "Pregunta anterior".</p></div>`,
+    choices: ["← Volver a la última pregunta", "Enviar mis respuestas"],
+    on_start: () => { jsPsych.progressBar.progress = 1; },
+    on_finish: (d) => { if (d.response === 0) k = total - 1; }
+  };
+
+  const bloqueItems = {
+    timeline: [{ timeline: [itemTrial], loop_function: () => k < total }, confirmar],
+    loop_function: () => k < total
+  };
 
   const preload = {
     type: jsPsychHtmlKeyboardResponse,
@@ -283,12 +339,9 @@
     const previas = jsPsych.data.get().filter({ tarea: PARTE === 1 ? "preguntas_previas" : "identificacion" }).values()[0];
     const r = (previas && previas.response) || {};
     const sistema = r.sistema_reproduccion === "other" ? `Otro: ${r["sistema_reproduccion-Comment"] || ""}` : r.sistema_reproduccion;
-    const respuestas = jsPsych.data.get().filter({ tarea: "item" }).values().map((d) => ({
-      par_id: d.par_id, estimulo_i: d.estimulo_i, estimulo_j: d.estimulo_j, estimulo_A: d.estimulo_A, estimulo_B: d.estimulo_B,
-      archivo_A: d.archivo_A, archivo_B: d.archivo_B, orden_presentacion: d.orden_presentacion,
-      respuesta_texto: d.respuesta_texto, respuesta_valor: d.respuesta_valor, valor_i_vs_j: d.valor_i_vs_j,
-      tiempo_ms: d.rt, reproducciones: d.reproducciones, escuchado_completo: d.escuchado_completo
-    }));
+    const respuestas = resp.filter(Boolean).map((x) => {
+      const { idx, ...resto } = x; return resto;
+    });
     return {
       parte: PARTE, atributo: P.atributo,
       email: normEmail(r.email),
@@ -302,7 +355,7 @@
   }
   function aCSV(p) {
     const cab = ["parte", "email", "edad", "toca_instrumento", "instrumento", "anios_instrumento", "genero_favorito", "sistema_reproduccion",
-      "par_id", "estimulo_i", "estimulo_j", "estimulo_A", "estimulo_B", "archivo_A", "archivo_B", "orden_presentacion", "respuesta_texto", "respuesta_valor", "valor_i_vs_j", "tiempo_ms", "reproducciones", "escuchado_completo"];
+      "par_id", "estimulo_i", "estimulo_j", "estimulo_A", "estimulo_B", "archivo_A", "archivo_B", "orden_presentacion", "respuesta_texto", "respuesta_valor", "valor_i_vs_j", "tiempo_ms", "reproducciones", "escuchado_completo", "veces_respondido", "respuesta_modificada"];
     const q = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
     const filas = p.respuestas.map((x) => cab.map((c) => q(x[c] !== undefined ? x[c] : p[c])).join(","));
     return [cab.join(","), ...filas].join("\n");
@@ -347,7 +400,7 @@
   // ---------- Timeline ----------
   const timeline = [preload, bienvenida, avisoFatiga,
     PARTE === 1 ? preguntasParte1 : preguntasParte2,
-    ...calibracion, instrucciones, ...trialsItems, envio, final];
+    ...calibracion, instrucciones, bloqueItems, envio, final];
 
   jsPsych.run(timeline);
 })();
